@@ -1,16 +1,36 @@
+import os
+import asyncio
+import logging
 from dotenv import load_dotenv
-
 from livekit import agents
 from livekit.agents import AgentSession, Agent, RoomInputOptions
 from livekit.plugins import (
     openai,
-    noise_cancellation,
     silero,
 )
-from livekit.plugins.turn_detector.multilingual import MultilingualModel
+
+# Conditional import for noise cancellation
+try:
+    from livekit.plugins import noise_cancellation
+    NOISE_CANCELLATION_AVAILABLE = True
+except ImportError:
+    NOISE_CANCELLATION_AVAILABLE = False
+    logging.warning("Noise cancellation plugin not available")
+
+# Conditional import for turn detector
+try:
+    from livekit.plugins.turn_detector.multilingual import MultilingualModel
+    TURN_DETECTOR_AVAILABLE = True
+except ImportError:
+    TURN_DETECTOR_AVAILABLE = False
+    logging.warning("Turn detector plugin not available")
 
 # Load environment variables from .env file
 load_dotenv()
+
+# Set up logging
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
 
 class FitnessAssistant(Agent):
     """
@@ -36,47 +56,112 @@ class FitnessAssistant(Agent):
         )
 
 async def entrypoint(ctx: agents.JobContext):
+    """Main entrypoint for the agent"""
+    try:
+        logger.info("Starting agent session...")
+        
+        # Verify required environment variables
+        required_vars = ['OPENAI_API_KEY', 'LIVEKIT_URL', 'LIVEKIT_API_KEY', 'LIVEKIT_API_SECRET']
+        missing_vars = [var for var in required_vars if not os.getenv(var)]
+        
+        if missing_vars:
+            logger.error(f"Missing required environment variables: {missing_vars}")
+            raise ValueError(f"Missing environment variables: {missing_vars}")
+        
+        # Create session components with error handling
+        session_kwargs = {
+            'stt': openai.STT(
+                model="whisper-1",
+            ),
+            'llm': openai.LLM(
+                model="gpt-4o-mini"  # Fixed model name
+            ),
+            'tts': openai.TTS(
+                model="tts-1",
+                voice="alloy",
+            ),
+            'vad': silero.VAD.load(),
+        }
+        
+        # Add turn detection if available
+        if TURN_DETECTOR_AVAILABLE:
+            session_kwargs['turn_detection'] = MultilingualModel()
+        
+        session = AgentSession(**session_kwargs)
+        
+        # Prepare room input options
+        room_input_options = RoomInputOptions()
+        if NOISE_CANCELLATION_AVAILABLE:
+            room_input_options.noise_cancellation = noise_cancellation.BVC()
+        
+        logger.info("Starting agent session with room...")
+        
+        # Start the session with the FitnessAssistant agent
+        await session.start(
+            room=ctx.room,
+            agent=FitnessAssistant(),
+            room_input_options=room_input_options,
+        )
+        
+        logger.info("Agent session started successfully")
+        
+        # Initial greeting
+        await session.generate_reply(
+            instructions="Greet the user warmly and ask about their fitness goals for today's session."
+        )
+        
+    except Exception as e:
+        logger.error(f"Error in entrypoint: {str(e)}")
+        raise
 
-    session = AgentSession(
-        stt=openai.STT(
-            model="whisper-1",
-        ),
-        llm=openai.LLM(
-            model="gpt-4.1-mini"
-        ),
-        tts=openai.TTS(
-            model="tts-1",
-            voice="alloy",
-            instructions="Speak in a friendly and conversational tone."
-        ),
-        vad=silero.VAD.load(),
-        turn_detection=MultilingualModel(),
-    )
-
-    # Start the session with the FitnessAssistant agent
-    await session.start(
-        room=ctx.room,
-        agent=FitnessAssistant(),
-        room_input_options=RoomInputOptions(
-            noise_cancellation=noise_cancellation.BVC(),
-        ),
-    )
-
-    # Greet the user and offer assistance
-    await session.generate_reply(
-        instructions="Greet the user and offer your assistance."
-    )
+def validate_environment():
+    """Validate that all required environment variables are set"""
+    required_vars = {
+        'OPENAI_API_KEY': 'OpenAI API key for STT, LLM, and TTS',
+        'LIVEKIT_URL': 'LiveKit server URL',
+        'LIVEKIT_API_KEY': 'LiveKit API key',
+        'LIVEKIT_API_SECRET': 'LiveKit API secret'
+    }
+    
+    missing = []
+    for var, description in required_vars.items():
+        if not os.getenv(var):
+            missing.append(f"{var} ({description})")
+    
+    if missing:
+        logger.error("Missing required environment variables:")
+        for var in missing:
+            logger.error(f"  - {var}")
+        return False
+    
+    logger.info("All required environment variables are set")
+    return True
 
 if __name__ == "__main__":
     try:
-        # Run the agent app from the command line
-        agents.cli.run_app(
-            agents.WorkerOptions(
-                entrypoint_fnc=entrypoint,
-            )
+        logger.info("Starting LiveKit agent...")
+        
+        # Validate environment before starting
+        if not validate_environment():
+            logger.error("Environment validation failed")
+            exit(1)
+        
+        # Create worker options with proper configuration
+        worker_options = agents.WorkerOptions(
+            entrypoint_fnc=entrypoint,
+            # Add worker-specific options
+            prewarm_fnc=None,  # Optional: function to run before worker starts
         )
+        
+        logger.info("Starting agent with CLI...")
+        
+        # Run the agent app from the command line
+        agents.cli.run_app(worker_options)
+        
+    except KeyboardInterrupt:
+        logger.info("Agent stopped by user")
     except Exception as e:
-        print(f"Error starting agent: {str(e)}")
-        # Add proper cleanup
-        import sys
-        sys.exit(1)
+        logger.error(f"Error starting agent: {str(e)}")
+        import traceback
+        traceback.print_exc()
+        exit(1)
