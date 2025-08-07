@@ -1,0 +1,10 @@
+livekit-agents
+python-dotenv
+openai
+torch
+torchaudio
+numpy
+scipy
+livekit
+livekit-agents[openai,silero,turn-detector]
+livekit-plugins-noise-cancellation
