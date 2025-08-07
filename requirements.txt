@@ -8,3 +8,6 @@ scipy
 livekit
 livekit-agents[openai,silero,turn-detector]
 livekit-plugins-noise-cancellation
+livekit-plugins-openai
+livekit-plugins-silero
+
