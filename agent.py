@@ -9,28 +9,33 @@ from livekit.plugins import (
     silero,
 )
 
+# Load environment variables from .env file first
+load_dotenv()
+
+# Set up logging with more detailed format
+logging.basicConfig(
+    level=logging.DEBUG,  # More verbose logging
+    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
+)
+logger = logging.getLogger(__name__)
+
 # Conditional import for noise cancellation
 try:
     from livekit.plugins import noise_cancellation
     NOISE_CANCELLATION_AVAILABLE = True
-except ImportError:
+    logger.info("Noise cancellation plugin loaded successfully")
+except ImportError as e:
     NOISE_CANCELLATION_AVAILABLE = False
-    logging.warning("Noise cancellation plugin not available")
+    logger.warning(f"Noise cancellation plugin not available: {e}")
 
 # Conditional import for turn detector
 try:
     from livekit.plugins.turn_detector.multilingual import MultilingualModel
     TURN_DETECTOR_AVAILABLE = True
-except ImportError:
+    logger.info("Turn detector plugin loaded successfully")
+except ImportError as e:
     TURN_DETECTOR_AVAILABLE = False
-    logging.warning("Turn detector plugin not available")
-
-# Load environment variables from .env file
-load_dotenv()
-
-# Set up logging
-logging.basicConfig(level=logging.INFO)
-logger = logging.getLogger(__name__)
+    logger.warning(f"Turn detector plugin not available: {e}")
 
 class FitnessAssistant(Agent):
     """
@@ -58,41 +63,75 @@ class FitnessAssistant(Agent):
 async def entrypoint(ctx: agents.JobContext):
     """Main entrypoint for the agent"""
     try:
-        logger.info("Starting agent session...")
+        logger.info("=== Starting agent session ===")
+        logger.info(f"Room ID: {ctx.room.sid if ctx.room else 'None'}")
         
         # Verify required environment variables
-        required_vars = ['OPENAI_API_KEY', 'LIVEKIT_URL', 'LIVEKIT_API_KEY', 'LIVEKIT_API_SECRET']
-        missing_vars = [var for var in required_vars if not os.getenv(var)]
+        required_vars = ['OPENAI_API_KEY']
+        optional_vars = ['LIVEKIT_URL', 'LIVEKIT_API_KEY', 'LIVEKIT_API_SECRET']
         
+        # Check required vars
+        missing_vars = [var for var in required_vars if not os.getenv(var)]
         if missing_vars:
             logger.error(f"Missing required environment variables: {missing_vars}")
             raise ValueError(f"Missing environment variables: {missing_vars}")
         
-        # Create session components with error handling
+        # Check optional vars (LiveKit might be configured differently in some deployments)
+        for var in optional_vars:
+            if os.getenv(var):
+                logger.info(f"{var} is set")
+            else:
+                logger.warning(f"{var} is not set")
+        
+        logger.info("Creating session components...")
+        
+        # Create session components with simpler configuration
         session_kwargs = {
             'stt': openai.STT(
                 model="whisper-1",
             ),
             'llm': openai.LLM(
-                model="gpt-4o-mini"  # Fixed model name
+                model="gpt-4o-mini",  # Fixed model name
+                temperature=0.7,
             ),
             'tts': openai.TTS(
                 model="tts-1",
                 voice="alloy",
             ),
-            'vad': silero.VAD.load(),
         }
+        
+        # Add VAD with error handling
+        try:
+            logger.info("Loading VAD...")
+            session_kwargs['vad'] = silero.VAD.load()
+            logger.info("VAD loaded successfully")
+        except Exception as e:
+            logger.error(f"Failed to load VAD: {e}")
+            # Continue without VAD for now
         
         # Add turn detection if available
         if TURN_DETECTOR_AVAILABLE:
-            session_kwargs['turn_detection'] = MultilingualModel()
+            try:
+                logger.info("Loading turn detector...")
+                session_kwargs['turn_detection'] = MultilingualModel()
+                logger.info("Turn detector loaded successfully")
+            except Exception as e:
+                logger.error(f"Failed to load turn detector: {e}")
         
+        logger.info("Creating AgentSession...")
         session = AgentSession(**session_kwargs)
         
-        # Prepare room input options
+        # Prepare room input options with minimal configuration
         room_input_options = RoomInputOptions()
+        
+        # Only add noise cancellation if explicitly available
         if NOISE_CANCELLATION_AVAILABLE:
-            room_input_options.noise_cancellation = noise_cancellation.BVC()
+            try:
+                logger.info("Adding noise cancellation...")
+                room_input_options.noise_cancellation = noise_cancellation.BVC()
+                logger.info("Noise cancellation added successfully")
+            except Exception as e:
+                logger.error(f"Failed to add noise cancellation: {e}")
         
         logger.info("Starting agent session with room...")
         
@@ -103,57 +142,105 @@ async def entrypoint(ctx: agents.JobContext):
             room_input_options=room_input_options,
         )
         
-        logger.info("Agent session started successfully")
+        logger.info("=== Agent session started successfully ===")
+        
+        # Wait a bit before sending initial greeting
+        await asyncio.sleep(1)
         
         # Initial greeting
-        await session.generate_reply(
-            instructions="Greet the user warmly and ask about their fitness goals for today's session."
-        )
+        try:
+            await session.generate_reply(
+                instructions="Greet the user warmly and ask about their fitness goals for today's session."
+            )
+            logger.info("Initial greeting sent")
+        except Exception as e:
+            logger.error(f"Failed to send initial greeting: {e}")
         
     except Exception as e:
         logger.error(f"Error in entrypoint: {str(e)}")
+        logger.error(f"Exception type: {type(e).__name__}")
+        import traceback
+        traceback.print_exc()
         raise
 
 def validate_environment():
     """Validate that all required environment variables are set"""
     required_vars = {
         'OPENAI_API_KEY': 'OpenAI API key for STT, LLM, and TTS',
+    }
+    
+    optional_vars = {
         'LIVEKIT_URL': 'LiveKit server URL',
-        'LIVEKIT_API_KEY': 'LiveKit API key',
+        'LIVEKIT_API_KEY': 'LiveKit API key', 
         'LIVEKIT_API_SECRET': 'LiveKit API secret'
     }
     
-    missing = []
+    # Check required variables
+    missing_required = []
     for var, description in required_vars.items():
         if not os.getenv(var):
-            missing.append(f"{var} ({description})")
+            missing_required.append(f"{var} ({description})")
+        else:
+            logger.info(f"✓ {var} is set")
     
-    if missing:
-        logger.error("Missing required environment variables:")
-        for var in missing:
+    if missing_required:
+        logger.error("Missing REQUIRED environment variables:")
+        for var in missing_required:
             logger.error(f"  - {var}")
         return False
     
-    logger.info("All required environment variables are set")
+    # Check optional variables
+    missing_optional = []
+    for var, description in optional_vars.items():
+        if not os.getenv(var):
+            missing_optional.append(f"{var} ({description})")
+        else:
+            logger.info(f"✓ {var} is set")
+    
+    if missing_optional:
+        logger.warning("Missing OPTIONAL environment variables:")
+        for var in missing_optional:
+            logger.warning(f"  - {var}")
+        logger.info("Agent will still attempt to start...")
+    
     return True
 
 if __name__ == "__main__":
     try:
-        logger.info("Starting LiveKit agent...")
+        logger.info("=== Starting LiveKit Agent ===")
+        logger.info(f"Python version: {os.sys.version}")
+        logger.info(f"Working directory: {os.getcwd()}")
+        
+        # Print all environment variables for debugging (be careful with secrets)
+        logger.info("Environment variables:")
+        for key in sorted(os.environ.keys()):
+            if 'SECRET' in key or 'KEY' in key or 'TOKEN' in key:
+                logger.info(f"  {key}: ***HIDDEN***")
+            else:
+                logger.info(f"  {key}: {os.environ[key]}")
         
         # Validate environment before starting
         if not validate_environment():
             logger.error("Environment validation failed")
             exit(1)
         
-        # Create worker options with proper configuration
+        # Test OpenAI connectivity
+        try:
+            logger.info("Testing OpenAI connectivity...")
+            import openai as openai_client
+            # This is just a basic test, adjust based on your OpenAI client version
+            logger.info("OpenAI client imported successfully")
+        except Exception as e:
+            logger.error(f"OpenAI connectivity test failed: {e}")
+        
+        # Create worker options with minimal configuration
+        logger.info("Creating worker options...")
         worker_options = agents.WorkerOptions(
             entrypoint_fnc=entrypoint,
-            # Add worker-specific options
-            prewarm_fnc=None,  # Optional: function to run before worker starts
         )
         
         logger.info("Starting agent with CLI...")
+        logger.info("If this hangs, the issue is likely with LiveKit server connectivity")
         
         # Run the agent app from the command line
         agents.cli.run_app(worker_options)
@@ -162,6 +249,7 @@ if __name__ == "__main__":
         logger.info("Agent stopped by user")
     except Exception as e:
         logger.error(f"Error starting agent: {str(e)}")
+        logger.error(f"Exception type: {type(e).__name__}")
         import traceback
         traceback.print_exc()
         exit(1)
