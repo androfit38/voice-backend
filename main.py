@@ -1,4 +1,5 @@
 import os
+import sys
 import asyncio
 from dotenv import load_dotenv
 from flask import Flask, jsonify, request
@@ -6,12 +7,7 @@ import threading
 
 from livekit import agents
 from livekit.agents import AgentSession, Agent, RoomInputOptions
-from livekit.plugins import (
-    openai,
-    noise_cancellation,
-    silero,
-)
-from livekit.plugins.turn_detector.multilingual import MultilingualModel
+from livekit.plugins import openai, silero, noise_cancellation
 
 # Load environment variables from .env file
 load_dotenv()
@@ -27,16 +23,16 @@ def validate_environment():
         'LIVEKIT_API_SECRET': 'LiveKit API secret for authentication',
         'LIVEKIT_URL': 'LiveKit server URL'
     }
-    
+
     missing_vars = []
     for var, description in required_vars.items():
         if not os.getenv(var) or os.getenv(var) == f'your_{var.lower()}_here':
             missing_vars.append(f'{var} ({description})')
-    
+
     if missing_vars:
         error_msg = (
             "Missing or invalid environment variables:\n" +
-            "\n".join(f"  - {var}" for var in missing_vars) +
+            "\n".join(f" - {var}" for var in missing_vars) +
             "\n\nPlease set your environment variables in Render dashboard.\n"
         )
         raise ValueError(error_msg)
@@ -46,6 +42,7 @@ class FitnessAssistant(Agent):
     AndrofitAI: An energetic, voice-interactive, and supportive AI personal gym coach.
     Guides users through personalized workout sessions with motivational feedback and real-time instructions.
     """
+
     def __init__(self) -> None:
         super().__init__(
             instructions=(
@@ -103,7 +100,7 @@ async def entrypoint(ctx: agents.JobContext):
                 instructions="Speak in a friendly and conversational tone."
             ),
             vad=silero.VAD.load(),
-            turn_detection=MultilingualModel(),
+            turn_detection="vad",  # Use simple VAD instead of MultilingualModel
         )
     except Exception as e:
         print(f"Failed to initialize agent session: {str(e)}")
@@ -132,7 +129,7 @@ def run_agent():
         
         # Validate environment variables
         validate_environment()
-        
+
         # Run the agent app
         agents.cli.run_app(
             agents.WorkerOptions(
@@ -153,10 +150,16 @@ def run_agent():
         print("4. Make sure LiveKit server is accessible")
 
 if __name__ == "__main__":
-    # Start the agent in a background thread
-    agent_thread = threading.Thread(target=run_agent, daemon=True)
-    agent_thread.start()
-    
-    # Run Flask app on the port Render provides
-    port = int(os.environ.get("PORT", 10000))
-    app.run(host="0.0.0.0", port=port)
+    # Handle command line arguments
+    if len(sys.argv) > 1 and sys.argv[1] == "start":
+        # If called with "start" argument, just run the agent
+        run_agent()
+    else:
+        # Default behavior: start both Flask and agent
+        # Start the agent in a background thread
+        agent_thread = threading.Thread(target=run_agent, daemon=True)
+        agent_thread.start()
+
+        # Run Flask app on the port Render provides
+        port = int(os.environ.get("PORT", 10000))
+        app.run(host="0.0.0.0", port=port)
