@@ -17,9 +17,7 @@ from livekit.agents import (
     llm,
     stt,
     tts,
-    vad,
-    JobRequest,
-    JobAcceptCallback
+    vad
 )
 from livekit.plugins import openai, silero
 
