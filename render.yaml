@@ -3,7 +3,7 @@ services:
     name: androfit-ai-agent
     runtime: python
     buildCommand: pip install -r requirements.txt
-    startCommand: python main.py
+    startCommand: python main.py start
     plan: free
     healthCheckPath: /health
     envVars:
