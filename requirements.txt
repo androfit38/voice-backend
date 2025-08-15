@@ -2,8 +2,9 @@
 livekit-agents
 livekit-plugins-openai
 livekit-plugins-silero
-livekit
+livekit-plugins-turn-detector
 livekit-plugins-noise-cancellation
+livekit
 
 # Web framework for health checks
 Flask
