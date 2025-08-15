@@ -24,3 +24,28 @@ aiohttp
 websockets
 protobuf
 grpcio
+
+# Core LiveKit dependencies
+livekit-agents
+livekit-plugins-openai
+livekit-plugins-silero
+
+# Web framework
+Flask
+
+# Environment management
+python-dotenv
+
+# Audio processing (may be required by plugins)
+numpy
+scipy
+
+# Async utilities
+asyncio-mqtt
+
+# Optional: for better logging
+colorlog
+
+# Ensure we have the right Python version support
+typing-extensions
+
