@@ -3,6 +3,7 @@ livekit-agents
 livekit-plugins-openai
 livekit-plugins-silero
 livekit
+livekit-plugins-noise-cancellation
 
 # Web framework for health checks
 Flask
@@ -22,4 +23,3 @@ aiohttp
 websockets
 protobuf
 grpcio
-
