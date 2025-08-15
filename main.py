@@ -17,7 +17,9 @@ from livekit.agents import (
     llm,
     stt,
     tts,
-    vad
+    vad,
+    JobRequest,
+    JobAcceptCallback
 )
 from livekit.plugins import openai, silero
 
@@ -33,6 +35,14 @@ load_dotenv()
 
 # Create Flask app for health checks
 app = Flask(__name__)
+
+# Global variable to track agent status
+agent_status = {
+    "initialized": False,
+    "running": False,
+    "error": None,
+    "last_heartbeat": None
+}
 
 def validate_environment():
     """Validate that all required environment variables are set."""
@@ -60,67 +70,200 @@ def validate_environment():
 class FitnessAssistant:
     """
     AndrofitAI: An energetic, voice-interactive, and supportive AI personal gym coach.
-    Guides users through personalized workout sessions with motivational feedback and real-time instructions.
     """
 
-    def __init__(self):
-        # Initialize components with error handling
-        self._initialize_components()
+    def __init__(self, ctx: JobContext):
+        self.ctx = ctx
+        self.room = ctx.room
+        
+        # Initialize components
+        self.stt_instance = openai.STT(model="whisper-1")
+        self.llm_instance = openai.LLM(model="gpt-4o-mini", temperature=0.7)
+        self.tts_instance = openai.TTS(model="tts-1", voice="alloy")
+        self.vad_instance = silero.VAD.load()
+        
+        logger.info("FitnessAssistant initialized successfully")
 
-    def _initialize_components(self):
-        """Initialize AI components with proper error handling."""
+    async def start(self):
+        """Start the fitness assistant."""
         try:
-            # Initialize STT (Speech-to-Text)
-            self.stt = openai.STT(
-                model="whisper-1",
-                language="en"
-            )
-            logger.info("STT initialized successfully")
+            # Connect to the room
+            await self.ctx.connect(auto_subscribe=AutoSubscribe.AUDIO_ONLY)
+            logger.info(f"Connected to room: {self.room.name}")
 
-            # Initialize LLM (Large Language Model) 
-            self.llm = openai.LLM(
-                model="gpt-4o-mini",
-                temperature=0.7,
-            )
-            logger.info("LLM initialized successfully")
-
-            # Initialize TTS (Text-to-Speech)
-            self.tts = openai.TTS(
-                model="tts-1",
-                voice="alloy",
-            )
-            logger.info("TTS initialized successfully")
-
-            # Initialize VAD (Voice Activity Detection)
-            self.vad = silero.VAD.load()
-            logger.info("VAD initialized successfully")
-
+            # Initial greeting
+            await self.say_greeting()
+            
+            # Start listening for audio
+            await self.setup_audio_pipeline()
+            
+            # Update agent status
+            agent_status["running"] = True
+            agent_status["last_heartbeat"] = time.time()
+            
+            logger.info("FitnessAssistant is ready and listening...")
+            
         except Exception as e:
-            logger.error(f"Failed to initialize components: {str(e)}")
+            logger.error(f"Error starting FitnessAssistant: {str(e)}")
+            agent_status["error"] = str(e)
             raise
 
-    async def say(self, text: str, allow_interruptions: bool = True):
-        """Convert text to speech and play it."""
+    async def say_greeting(self):
+        """Send initial greeting."""
+        greeting = (
+            "Hey there! I'm AndrofitAI, your personal gym coach! "
+            "How's your vibe today? Ready to crush it? "
+            "Tell me about your fitness goals, experience level, and what equipment you have available!"
+        )
+        
+        await self.say(greeting)
+
+    async def say(self, text: str):
+        """Convert text to speech and publish to room."""
         try:
-            logger.info(f"TTS: {text}")
-            await self.tts.say(text, allow_interruptions=allow_interruptions)
+            logger.info(f"AndrofitAI: {text}")
+            
+            # Generate audio using TTS
+            tts_stream = self.tts_instance.synthesize(text)
+            audio_frames = []
+            
+            async for frame in tts_stream:
+                audio_frames.append(frame)
+            
+            # If we have audio frames, publish them
+            if audio_frames:
+                # Create audio track and publish
+                source = rtc.AudioSource(24000, 1)  # 24kHz mono
+                track = rtc.LocalAudioTrack.create_audio_track("assistant_voice", source)
+                
+                options = rtc.TrackPublishOptions()
+                options.source = rtc.TrackSource.SOURCE_MICROPHONE
+                
+                publication = await self.room.local_participant.publish_track(track, options)
+                logger.info(f"Published audio track: {publication.sid}")
+                
+                # Push audio frames
+                for frame in audio_frames:
+                    await source.capture_frame(frame)
+                    
         except Exception as e:
             logger.error(f"Error in TTS: {str(e)}")
 
-# Flask routes for health checks and status
+    async def setup_audio_pipeline(self):
+        """Set up the audio processing pipeline."""
+        try:
+            # Subscribe to audio tracks from participants
+            for participant in self.room.remote_participants.values():
+                await self.subscribe_to_participant(participant)
+            
+            # Listen for new participants
+            @self.room.on("participant_connected")
+            def on_participant_connected(participant: rtc.RemoteParticipant):
+                logger.info(f"Participant connected: {participant.identity}")
+                asyncio.create_task(self.subscribe_to_participant(participant))
+            
+            # Listen for track subscribed events
+            @self.room.on("track_subscribed")  
+            def on_track_subscribed(
+                track: rtc.Track,
+                publication: rtc.RemoteTrackPublication,
+                participant: rtc.RemoteParticipant
+            ):
+                if track.kind == rtc.TrackKind.KIND_AUDIO:
+                    logger.info(f"Subscribed to audio track from {participant.identity}")
+                    asyncio.create_task(self.process_audio_track(track))
+            
+        except Exception as e:
+            logger.error(f"Error setting up audio pipeline: {str(e)}")
+            raise
+
+    async def subscribe_to_participant(self, participant: rtc.RemoteParticipant):
+        """Subscribe to a participant's tracks."""
+        try:
+            for publication in participant.track_publications.values():
+                if publication.track and publication.track.kind == rtc.TrackKind.KIND_AUDIO:
+                    await publication.set_subscribed(True)
+                    
+        except Exception as e:
+            logger.error(f"Error subscribing to participant {participant.identity}: {str(e)}")
+
+    async def process_audio_track(self, track: rtc.AudioTrack):
+        """Process incoming audio track for speech recognition."""
+        try:
+            # Create STT stream
+            stt_stream = self.stt_instance.recognize(
+                audio_stream=track,
+                language="en"
+            )
+            
+            # Process STT events
+            async for event in stt_stream:
+                if event.type == stt.SpeechEventType.FINAL_TRANSCRIPT:
+                    transcript = event.alternatives[0].text
+                    logger.info(f"User said: {transcript}")
+                    
+                    # Generate and speak response
+                    await self.generate_response(transcript)
+                    
+                    # Update heartbeat
+                    agent_status["last_heartbeat"] = time.time()
+                    
+        except Exception as e:
+            logger.error(f"Error processing audio track: {str(e)}")
+
+    async def generate_response(self, user_text: str):
+        """Generate and speak response to user input."""
+        try:
+            # System prompt for fitness coaching
+            system_prompt = """You are AndrofitAI, an energetic, voice-interactive, and supportive AI personal gym coach.
+
+Guidelines:
+- Be enthusiastic and motivational
+- Provide personalized workout plans based on user's goals, experience, and equipment
+- Give clear, step-by-step exercise instructions
+- Offer form tips and safety advice
+- Adapt to user's energy level and feedback
+- Keep responses conversational and engaging (60-100 words max)
+- Use encouraging language like "You've got this!" and "Let's crush it!"
+- For workout plans, be specific about reps, sets, and rest periods
+- Always prioritize safety and proper form
+
+Respond to the user's message in a way that's helpful for their fitness journey."""
+
+            # Generate response
+            chat_ctx = llm.ChatContext()
+            chat_ctx.messages.append(llm.ChatMessage(role="system", content=system_prompt))
+            chat_ctx.messages.append(llm.ChatMessage(role="user", content=user_text))
+            
+            response = await self.llm_instance.achat(chat_ctx=chat_ctx)
+            response_text = response.choices[0].message.content
+            
+            # Speak the response
+            await self.say(response_text)
+            
+        except Exception as e:
+            logger.error(f"Error generating response: {str(e)}")
+            await self.say("Sorry, I had a technical hiccup there. Can you repeat that?")
+
+# Flask routes
 @app.route('/', methods=['GET'])
 def health_check():
     return jsonify({
         "status": "healthy",
         "service": "AndrofitAI Agent",
-        "message": "LiveKit agent is running",
+        "message": "LiveKit agent service is running",
+        "agent_status": agent_status,
         "timestamp": time.time()
     })
 
 @app.route('/health', methods=['GET'])
 def health():
     return jsonify({
-        "status": "ok",
+        "status": "ok" if agent_status.get("running", False) else "starting",
+        "agent_initialized": agent_status.get("initialized", False),
+        "agent_running": agent_status.get("running", False),
+        "last_heartbeat": agent_status.get("last_heartbeat"),
+        "error": agent_status.get("error"),
         "timestamp": time.time()
     })
 
@@ -135,142 +278,84 @@ def status():
             "openai_configured": bool(openai_key and not openai_key.startswith('your_')),
             "livekit_configured": bool(livekit_url and not livekit_url.startswith('wss://your-')),
             "python_version": sys.version,
-            "agents_version": getattr(agents, '__version__', 'unknown')
         },
+        "agent_status": agent_status,
         "timestamp": time.time()
     })
 
 async def entrypoint(ctx: JobContext):
     """Main entrypoint for the LiveKit agent."""
-    logger.info(f"Connecting to room: {ctx.room.name}")
+    logger.info(f"Agent job started for room: {ctx.room.name}")
     
     try:
-        # Create the fitness assistant
-        assistant = FitnessAssistant()
+        # Update agent status
+        agent_status["initialized"] = True
+        agent_status["error"] = None
         
-        # Connect to the room
-        await ctx.connect(auto_subscribe=AutoSubscribe.AUDIO_ONLY)
-        logger.info("Connected to room successfully")
-
-        # Greet the user
-        greeting = (
-            "Hey there! I'm AndrofitAI, your personal gym coach! "
-            "How's your vibe today? Ready to crush it? "
-            "Tell me about your fitness goals, experience level, and what equipment you have available!"
-        )
-        
-        await assistant.say(greeting, allow_interruptions=True)
-
-        # Set up the main conversation loop
-        chat = rtc.ChatManager(ctx.room)
-
-        async def answer_from_text(text: str):
-            """Generate and speak a response to user text."""
-            logger.info(f"User said: {text}")
-            
-            try:
-                # Create fitness coach prompt
-                system_prompt = """You are AndrofitAI, an energetic, voice-interactive, and supportive AI personal gym coach.
-
-Guidelines:
-- Be enthusiastic and motivational
-- Provide personalized workout plans based on user's goals, experience, and equipment
-- Give clear, step-by-step exercise instructions
-- Offer form tips and safety advice
-- Adapt to user's energy level and feedback
-- Keep responses conversational and engaging
-- Use encouraging language like "You've got this!" and "Let's crush it!"
-- For workout plans, be specific about reps, sets, and rest periods
-- Always prioritize safety and proper form
-
-Respond to the user's message in a way that's helpful for their fitness journey."""
-
-                # Generate response using LLM
-                response = await assistant.llm.achat(
-                    chat_ctx=llm.ChatContext(
-                        messages=[
-                            llm.ChatMessage(role="system", content=system_prompt),
-                            llm.ChatMessage(role="user", content=text)
-                        ]
-                    )
-                )
-                
-                # Speak the response
-                await assistant.say(response.choices[0].message.content)
-                
-            except Exception as e:
-                logger.error(f"Error generating response: {str(e)}")
-                await assistant.say("Sorry, I had a technical hiccup there. Can you repeat that?")
-
-        # Listen for speech
-        async def on_human_speech(ev: stt.SpeechEvent):
-            """Handle human speech events."""
-            if ev.type == stt.SpeechEventType.FINAL_TRANSCRIPT:
-                await answer_from_text(ev.alternatives[0].text)
-
-        # Set up speech recognition
-        assistant.stt.on("speech_event", on_human_speech)
-        
-        # Start listening for audio
-        assistant.stt.start()
-        
-        logger.info("Agent is ready and listening...")
+        # Create and start the fitness assistant
+        assistant = FitnessAssistant(ctx)
+        await assistant.start()
         
         # Keep the agent running
-        await asyncio.Event().wait()
-
+        while True:
+            await asyncio.sleep(10)  # Heartbeat every 10 seconds
+            agent_status["last_heartbeat"] = time.time()
+            
     except Exception as e:
         logger.error(f"Error in entrypoint: {str(e)}")
+        agent_status["error"] = str(e)
+        agent_status["running"] = False
         raise
 
 def run_agent():
     """Run the LiveKit agent."""
     try:
-        logger.info("Starting AndrofitAI agent...")
+        logger.info("Starting AndrofitAI LiveKit agent...")
         
-        # Check environment configuration
+        # Validate environment
+        validate_environment()
+        
+        # Log configuration status
         openai_configured = bool(os.getenv('OPENAI_API_KEY') and not os.getenv('OPENAI_API_KEY').startswith('your_'))
         livekit_configured = bool(os.getenv('LIVEKIT_URL') and not os.getenv('LIVEKIT_URL').startswith('wss://your-'))
         
         logger.info(f"OpenAI API Key configured: {'✓' if openai_configured else '✗'}")
         logger.info(f"LiveKit configured: {'✓' if livekit_configured else '✗'}")
         
-        # Validate environment variables
-        validate_environment()
+        if not openai_configured or not livekit_configured:
+            raise ValueError("Required API keys not properly configured")
 
-        # Create worker options with timeout settings
+        # Create worker options
         worker_opts = WorkerOptions(
             entrypoint_fnc=entrypoint,
             ws_url=os.getenv("LIVEKIT_URL"),
             api_key=os.getenv("LIVEKIT_API_KEY"),
             api_secret=os.getenv("LIVEKIT_API_SECRET"),
-            # Add timeout configurations
-            job_request_timeout=30.0,
-            # Set worker permissions
-            permissions=rtc.ParticipantPermissions(
-                can_subscribe=True,
-                can_publish=True,
-                can_publish_data=True,
-            ),
         )
 
         # Run the agent
+        logger.info("Starting LiveKit worker...")
         cli.run_app(worker_opts)
         
-    except ValueError as e:
-        logger.error(f"Configuration Error: {str(e)}")
-        sys.exit(1)
-    except KeyboardInterrupt:
-        logger.info("Agent stopped by user")
-        sys.exit(0)
     except Exception as e:
-        logger.error(f"Error starting agent: {str(e)}")
-        logger.info("\nTroubleshooting tips:")
-        logger.info("1. Ensure your environment variables are properly configured")
-        logger.info("2. Check your internet connection")
-        logger.info("3. Verify your API keys are valid")
-        logger.info("4. Make sure LiveKit server is accessible")
-        sys.exit(1)
+        logger.error(f"Failed to start agent: {str(e)}")
+        agent_status["error"] = str(e)
+        agent_status["initialized"] = False
+        agent_status["running"] = False
+        
+        # Don't exit - keep Flask running for health checks
+        logger.info("Agent failed to start, but keeping Flask server running for debugging")
+
+def start_agent_thread():
+    """Start the agent in a separate thread."""
+    agent_thread = threading.Thread(
+        target=run_agent, 
+        name="LiveKitAgent",
+        daemon=True
+    )
+    agent_thread.start()
+    logger.info("Agent thread started")
+    return agent_thread
 
 def signal_handler(signum, frame):
     """Handle shutdown signals gracefully."""
@@ -278,52 +363,48 @@ def signal_handler(signum, frame):
     sys.exit(0)
 
 if __name__ == "__main__":
-    # Set up signal handlers for graceful shutdown
-    signal.signal(signal.SIGINT, signal_handler)
+    # Set up signal handlers
+    signal.signal(signal.SIGINT, signal_handler) 
     signal.signal(signal.SIGTERM, signal_handler)
     
     # Handle command line arguments
     if len(sys.argv) > 1:
         if sys.argv[1] == "start":
-            # If called with "start" argument, just run the agent
+            # Run only the agent
             run_agent()
         elif sys.argv[1] == "download-files":
-            # Handle download-files command for Docker build
-            logger.info("Downloading model files...")
+            logger.info("Pre-loading model files...")
             try:
-                # Pre-load models
                 silero.VAD.load()
-                logger.info("Model files downloaded successfully!")
+                logger.info("Model files loaded successfully!")
             except Exception as e:
-                logger.warning(f"Could not download model files: {e}")
-                logger.info("This is normal during build - files will be downloaded at runtime.")
+                logger.warning(f"Could not pre-load models: {e}")
+        elif sys.argv[1] == "flask-only":
+            # Run only Flask (for debugging)
+            port = int(os.environ.get("PORT", 10000))
+            logger.info(f"Starting Flask-only mode on port {port}")
+            app.run(host="0.0.0.0", port=port, debug=False)
         else:
             logger.error(f"Unknown command: {sys.argv[1]}")
-            logger.info("Available commands: start, download-files")
             sys.exit(1)
     else:
-        # Default behavior: start both Flask and agent
-        logger.info("Starting in hybrid mode (Flask + Agent)")
+        # Default: Run both Flask and Agent
+        logger.info("Starting in hybrid mode (Flask + LiveKit Agent)")
         
-        # Start the agent in a background thread
-        agent_thread = threading.Thread(target=run_agent, daemon=True)
-        agent_thread.start()
+        # Start agent in background thread
+        start_agent_thread()
         
-        # Give the agent thread a moment to start
-        time.sleep(2)
-
-        # Run Flask app on the port provided by the platform
+        # Wait a moment for agent to initialize
+        time.sleep(3)
+        
+        # Start Flask server
         port = int(os.environ.get("PORT", 10000))
         logger.info(f"Starting Flask server on port {port}")
         
-        try:
-            app.run(
-                host="0.0.0.0", 
-                port=port,
-                debug=False,
-                use_reloader=False,  # Disable reloader to prevent conflicts
-                threaded=True
-            )
-        except Exception as e:
-            logger.error(f"Flask server error: {str(e)}")
-            sys.exit(1)
+        app.run(
+            host="0.0.0.0", 
+            port=port,
+            debug=False,
+            use_reloader=False,
+            threaded=True
+        )
