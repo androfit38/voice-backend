@@ -151,9 +151,28 @@ def run_agent():
 
 if __name__ == "__main__":
     # Handle command line arguments
-    if len(sys.argv) > 1 and sys.argv[1] == "start":
-        # If called with "start" argument, just run the agent
-        run_agent()
+    if len(sys.argv) > 1:
+        if sys.argv[1] == "start":
+            # If called with "start" argument, just run the agent
+            run_agent()
+        elif sys.argv[1] == "download-files":
+            # Handle download-files command for Docker build
+            print("Downloading model files...")
+            try:
+                # This will download required model files
+                agents.cli.run_app(
+                    agents.WorkerOptions(
+                        entrypoint_fnc=entrypoint,
+                        ws_url="wss://dummy-url",  # Dummy URL for download
+                        api_key="dummy",
+                        api_secret="dummy",
+                    ),
+                    download_files=True
+                )
+                print("Model files downloaded successfully!")
+            except Exception as e:
+                print(f"Warning: Could not download model files: {e}")
+                print("This is normal during Docker build - files will be downloaded at runtime.")
     else:
         # Default behavior: start both Flask and agent
         # Start the agent in a background thread
