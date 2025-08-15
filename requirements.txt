@@ -1,24 +1,25 @@
 # LiveKit and AI dependencies
-livekit-agents>=0.8.0
-livekit-plugins-openai>=0.7.0
-livekit-plugins-silero>=0.6.0
-livekit>=0.15.0
+livekit-agents
+livekit-plugins-openai
+livekit-plugins-silero
+livekit
 
 # Web framework for health checks
-Flask>=2.3.0
+Flask
 
 # Environment management
-python-dotenv>=1.0.0
+python-dotenv
 
 # Audio processing and AI
-openai>=1.0.0
-torch>=2.0.0
-torchaudio>=2.0.0
-numpy>=1.24.0
-soundfile>=0.12.0
+openai
+torch
+torchaudio
+numpy
+soundfile
 
 # Additional dependencies that might be required
-aiohttp>=3.8.0
-websockets>=11.0.0
-protobuf>=4.23.0
-grpcio>=1.56.0
+aiohttp
+websockets
+protobuf
+grpcio
+
