@@ -30,6 +30,14 @@ loguru>=0.7.0
 # Optional: Performance Monitoring
 psutil>=5.9.0
 
+
+livekit-agents
+python-dotenv
+openai
+torch
+torchaudio
+numpy
+scipy
 livekit
 livekit-agents[openai,silero,turn-detector]
 livekit-plugins-noise-cancellation
