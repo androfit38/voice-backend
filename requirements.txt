@@ -7,9 +7,6 @@ livekit-plugins-openai>=0.7.0
 livekit-plugins-silero>=0.6.0
 livekit-plugins-turn-detector>=0.6.0
 
-# Noise Cancellation Plugin (separate package)
-livekit-plugins-krisp
-
 # Environment Management
 python-dotenv>=1.0.0
 
@@ -36,5 +33,6 @@ psutil>=5.9.0
 livekit
 livekit-agents[openai,silero,turn-detector]
 livekit-plugins-noise-cancellation
+
 
 
