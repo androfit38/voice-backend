@@ -8,8 +8,7 @@ from livekit.plugins import (
     noise_cancellation,
     silero,
 )
-# Import the correct turn detector
-from livekit.plugins.turn_detector import MultilingualTurnDetector
+from livekit.plugins.turn_detector.multilingual import MultilingualModel
 
 # Load environment variables from .env file
 load_dotenv()
@@ -63,27 +62,8 @@ class FitnessAssistant(Agent):
             )
         )
 
-async def download_models():
-    """Download required models for the agent."""
-    try:
-        print("Downloading required models...")
-        # Download turn detector model
-        await MultilingualTurnDetector.load()
-        print("Models downloaded successfully!")
-    except Exception as e:
-        print(f"Warning: Failed to download models: {str(e)}")
-        print("The agent may still work but with reduced functionality.")
-
 async def entrypoint(ctx: agents.JobContext):
     try:
-        # Initialize turn detector with error handling
-        try:
-            turn_detector = MultilingualTurnDetector()
-        except Exception as e:
-            print(f"Warning: Turn detector initialization failed: {str(e)}")
-            print("Falling back to basic VAD...")
-            turn_detector = silero.VAD.load()
-        
         # Initialize session with proper error handling
         session = AgentSession(
             stt=openai.STT(
@@ -98,7 +78,7 @@ async def entrypoint(ctx: agents.JobContext):
                 instructions="Speak in a friendly and conversational tone."
             ),
             vad=silero.VAD.load(),
-            turn_detection=turn_detector,
+            turn_detection=MultilingualModel(),
         )
     except Exception as e:
         print(f"Failed to initialize agent session: {str(e)}")
@@ -118,22 +98,11 @@ async def entrypoint(ctx: agents.JobContext):
         instructions="Greet the user and offer your assistance."
     )
 
-async def main():
-    """Main function with model download support."""
-    import sys
-    
-    # Check if we need to download models
-    if len(sys.argv) > 1 and sys.argv[1] == "download-files":
-        await download_models()
-        return
-    
+if __name__ == "__main__":
     try:
         print("Starting AndrofitAI agent...")
         print(f"OpenAI API Key configured: {'✓' if os.getenv('OPENAI_API_KEY') and not os.getenv('OPENAI_API_KEY').startswith('your_') else '✗'}")
         print(f"LiveKit configured: {'✓' if os.getenv('LIVEKIT_URL') and not os.getenv('LIVEKIT_URL').startswith('wss://your-') else '✗'}")
-        
-        # Try to download models automatically
-        await download_models()
         
         # Run the agent app from the command line
         agents.cli.run_app(
@@ -148,6 +117,7 @@ async def main():
     except ValueError as e:
         # Handle environment variable errors
         print(f"Configuration Error: {str(e)}")
+        import sys
         sys.exit(1)
     except Exception as e:
         print(f"Error starting agent: {str(e)}")
@@ -156,9 +126,6 @@ async def main():
         print("2. Check your internet connection")
         print("3. Verify your API keys are valid")
         print("4. Make sure LiveKit server is accessible")
-        print("5. Run 'python your_agent.py download-files' to download required models")
+        # Add proper cleanup
+        import sys
         sys.exit(1)
-
-if __name__ == "__main__":
-    import asyncio
-    asyncio.run(main())
